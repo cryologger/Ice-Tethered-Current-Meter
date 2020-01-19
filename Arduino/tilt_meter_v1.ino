@@ -1,6 +1,6 @@
 /*
-  Title:    Current tilt meter prototype
-  Date:     January 18, 2020
+  Title:    Cryologger - Current tilt meter v1
+  Date:     January 19, 2020
   Author:   Adam Garbo
 
   Components:
@@ -23,46 +23,46 @@
 #include <Wire.h>               // https://www.arduino.cc/en/Reference/Wire
 
 // Defined constants
-#define DEBUG         true
+#define DEBUG         true  //
 #define LED_PIN       8     // Adalogger green LED pin
 #define RTC_INT_PIN   5     // RTC interrupt pin
 #define SD_CS_PIN     4     // SD card chip select
-#define VBAT_PIN      A7
+#define VBAT_PIN      A7    // Battery voltage divider pin
 
 // Object instantiations
-LSM303    imu;          // I2C Address: 0x1E (Magnetometer), 0x6B (Accelerometer)
-DS3232RTC rtc(false);   // I2C Address: 0x
-SdFat     sd;
-SdFile    file;
-
-// Declare global variables and constants
-volatile bool   alarmFlag         = false;                  // RTC alarm interrupt service routine (ISR) flag
-volatile bool   sleepFlag         = false;                  // Watchdog Timer Early Warning interrupt flag
-bool            ledState          = LOW;                    // LED toggle flag for blink() function
-char            dirName[9]        = "YYYYMMDD";             // Log file directory name
-char            fileName[22]      = "YYYYMMDD/HHMMSS.txt";  // Log file name format limited to 8.3 characters: YYYYMMDD/HHMMSS.ubx
-uint8_t         transmitBuffer[340] = {};                   // RockBLOCK transmission buffer
-float           pitch             = 0;
-float           roll              = 0;
-float           heading           = 0;
-float           voltage           = 0;
-uint16_t        sampleCounter     = 0;  // Sensor measurement counter
-uint16_t        samplesSaved      = 0;  // Log file sample counter
-uint16_t        retransmitCounter = 0;  // RockBLOCK failed data transmission counter
-uint16_t        messageCounter    = 0;  // RockBLOCK transmission counter
-uint16_t        transmitCounter   = 0;  // RockBLOCK transmission interval counter
-uint32_t        alarmTime         = 0;
-uint32_t        unixtime          = 0;
-uint32_t        previousMillis    = 0;
-time_t          t;
-tmElements_t    tm;
+LSM303      imu;        // I2C Address: 0x1E (Magnetometer), 0x19 (Accelerometer)
+DS3232RTC   rtc(false); // I2C Address: 0x68
+SdFat       sd;
+SdFile      file;
 
 // User defined global variable declarations
-uint32_t        alarmInterval         = 60;              // Sleep duration (in seconds) between data sample acquisitions. Default = 5 minutes (300 seconds)
-uint16_t        averageInterval       = 2;                // Number of samples to be averaged for each RockBLOCK transmission. Default = 12 (Hourly)
-uint16_t        transmitInterval      = 12;               // Number of message to be included in a single transmission (340 byte limit). Default = 3 (Every 3 hours)
-uint16_t        maxRetransmitCounter  = 10;               // Maximum number of failed data transmissions to reattempt in a single message (340 byte limit). Default: 10
-uint16_t        samplesPerFile        = 8640;             // Maximum number of samples stored in a file before new log file creation (Default: 30 days * 288 samples per day)
+uint32_t  alarmInterval         = 1800;   // Sleep duration (in seconds) between data sample acquisitions. Default = 30 minutes (1800 seconds)
+uint16_t  transmitInterval      = 12;     // Number of message to be included in a single transmission (340 byte limit). Default = 12 (Every 6 hours)
+uint16_t  maxRetransmitCounter  = 1;      // Maximum number of failed data transmissions to reattempt in a single message (340 byte limit). Default: 10
+uint16_t  samplesPerFile        = 40320;  // Maximum number of samples stored in a file before new log file creation (Default: 7 days * 5760 samples per day)
+
+// Declare global variables and constants
+volatile bool alarmFlag           = false;                  // RTC alarm interrupt service routine (ISR) flag
+volatile bool sleepFlag           = false;                  // Watchdog Timer Early Warning interrupt flag
+bool          loggingFlag         = false;                  // SD card logging flag
+bool          ledState            = LOW;                    // LED toggle flag for blink() function
+char          dirName[9]          = "YYYYMMDD";             // Log file directory name
+char          fileName[22]        = "YYYYMMDD/HHMMSS.txt";  // Log file name format limited to 8.3 characters: YYYYMMDD/HHMMSS.ubx
+float         heading             = 0;                      // LSM303 heading
+float         pitch               = 0;                      // LSM303 pitch
+float         roll                = 0;                      // LSM303 roll
+float         voltage             = 0;                      // Battery voltage
+uint8_t       transmitBuffer[340] = {};                     // RockBLOCK transmission buffer
+uint16_t      messageCounter      = 0;                      // Transmission counter
+uint16_t      retransmitCounter   = 0;                      // Failed data transmission counter
+uint16_t      sampleCounter       = 0;                      // Sensor measurement counter
+uint16_t      samplesSaved        = 0;                      // Log file sample counter
+uint16_t      transmitCounter     = 0;                      // Transmission interval counter
+uint32_t      alarmTime           = 0;                      // RTC alarm time
+uint32_t      previousMillis      = 0;                      // Global millis() counter variable
+uint32_t      unixtime            = 0;                      // RTC epoch time
+time_t        t;
+tmElements_t  tm;
 
 // Statistics objects
 Statistic batteryStats;   // Battery voltage statistics
@@ -136,30 +136,29 @@ void setup() {
     time_t t = makeTime(tm);  // change the tm structure into time_t (seconds since epoch)
     rtc.set(t);
   */
-  
+
   // Print current date and time
   printDatetime(rtc.get());
 
   // Initialize the SD card
   if (sd.begin(SD_CS_PIN, SD_SCK_MHZ(4))) {
     Serial.println(F("SD card initialized."));
-    createLogFile(); // Create new log file
-    loggingFlag = true;
+    loggingFlag = true; // Enable logging
+    createLogFile();    // Create new log file
   }
   else {
-    Serial.println("Warning: Unable to initialize SD card. Halting.");
+    Serial.println("Warning: Unable to initialize SD card.");
     digitalWrite(LED_PIN, HIGH);
     digitalWrite(LED_BUILTIN, HIGH);
-    loggingFlag = false; // Disable logging if SD initialization fails
-    while (1); // Halt the program
+    loggingFlag = false; // Disable logging
   }
 
   // Initialize the IMU
   if (imu.init()) {
-    Serial.println(F("LSM303 detected."));
+    Serial.println(F("LSM303 initalized."));
   }
   else {
-    Serial.println(F("Warning: LSM303 not detected. Halting."));
+    Serial.println(F("Warning: Unable to initialize LSM303."));
     digitalWrite(LED_PIN, HIGH);
     while (1);
   }
@@ -182,10 +181,11 @@ void loop() {
 
       rtc.read(tm);       // Read current date and time
       t = makeTime(tm);   // Convert tm structure into time_t (seconds since epoch)
+      Serial.print(F("Alarm triggered: "));
+      printDatetime(t);   // Print ALARM_1 date and time
 
       sampleCounter++;    // Increment sample counter
       petDog();           // Pet the Watchdog Timer
-      printDatetime(t);   // Print ALARM_1 date and time
 
       // Write data to union
       message.unixtime = t;
@@ -193,13 +193,13 @@ void loop() {
       // Perform measurements
       uint32_t loopStartTime = millis();
       // Log data for 2 minutes
-      while (millis() - loopStartTime < 1UL * 30UL * 1000UL) {
+      while (millis() - loopStartTime < 2UL * 60UL * 1000UL) {
         readBattery();  // Read battery
         readRtc();      // Read RTC
         readImu();      // Read IMU
         logData();      // Log data to the SD card
+        petDog();       // Pet the dog
         blink(LED_PIN, 1, 500);
-        petDog();    // Pet the dog
       }
 
       // Perform statistics on measurements
@@ -211,14 +211,14 @@ void loop() {
 
       // Transmit data
       if (transmitCounter == transmitInterval) {
-        //transmitData();
+        transmitData();
         transmitCounter = 0;
       }
 
-      // Set alarm 1
-      alarmTime = t + alarmInterval;      // Calculate next alarm
+      // Set alarm
+      alarmTime = t + alarmInterval;  // Calculate next alarm
       rtc.setAlarm(ALM1_MATCH_DATE, 0, minute(alarmTime), hour(alarmTime), day(alarmTime)); // Set alarm
-      rtc.alarm(ALARM_1);               // Ensure alarm 1 interrupt flag is cleared
+      rtc.alarm(ALARM_1);             // Ensure alarm 1 interrupt flag is cleared
       Serial.print(F("Next alarm: "));
       printDatetime(alarmTime);
 
@@ -289,12 +289,12 @@ void readImu() {
   */
 
   imu.m_min = (LSM303::vector<int16_t>) {
-    //-32767, -32767, -32767    // Default
-    -702, -778, -802   // Test unit
+    //-32767, -32767, -32767  // Default
+    -702, -778, -802          // Test unit
   };
   imu.m_max = (LSM303::vector<int16_t>) {
-    //+32767, +32767, +32767    // Default
-    +771, +777, +658   // Test unit
+    //+32767, +32767, +32767  // Default
+    +771, +777, +658          // Test unit
   };
 
   // Read LSM303
@@ -325,6 +325,11 @@ void readImu() {
 // Create a new log file
 void createLogFile() {
 
+  // Check if logging is enabled
+  if (loggingFlag == false) {
+    return;
+  }
+
   // Close any open files
   if (file.isOpen()) {
     file.close();
@@ -347,14 +352,13 @@ void createLogFile() {
   snprintf(fileName, sizeof(fileName), "%04u%02d%02d/%02d%02d%02d.csv",
            (tm.Year + 1970), tm.Month, tm.Day, tm.Hour, tm.Minute, tm.Second);
 
-  if (file.open(fileName, O_CREAT | O_WRITE | O_APPEND)) {
-    //if (file.open(fileName, O_CREAT | O_WRITE | O_EXCL)) {
+  if (file.open(fileName, O_CREAT | O_WRITE | O_EXCL)) {
     Serial.print("Logging to: ");
     Serial.println(fileName);
   }
   else {
-    Serial.println(F("Warning: Unable to open new log file. Halting"));
-    while (1);
+    Serial.println(F("Warning: Unable to open new log file"));
+    loggingFlag = false;
   }
 
   // Set the log file creation time
@@ -370,11 +374,16 @@ void createLogFile() {
   file.close();
 }
 
-// Write data to log file
+// Log data to the DS card
 void logData() {
 
-  // Check if sample limit has not been exceeded
-  if (samplesSaved >= 10000) {
+  // Check if logging is enabled
+  if (loggingFlag == false) {
+    return;
+  }
+
+  // Check if samples per file limit has been exceeded
+  if (samplesSaved >= samplesPerFile) {
     createLogFile();
     samplesSaved = 0;
   }
@@ -441,6 +450,22 @@ void writeTimestamps() {
   }
 }
 
+// Calculate statistics and clear objects
+void calculateStatistics() {
+
+  // Write  statistics data to union
+  message.pitch   = pitchStats.average()      * 100;  // Pitch mean
+  message.roll    = rollStats.average()       * 100;  // Roll mean
+  message.heading = headingStats.average()    * 100;  // Heading mean
+  message.voltage = batteryStats.minimum()    * 1000; // Battery voltage min
+
+  // Clear statistics objects
+  batteryStats.clear();
+  pitchStats.clear();
+  rollStats.clear();
+  headingStats.clear();
+}
+
 // Write union data to transmit buffer in preparation of transmission
 void writeBuffer() {
   messageCounter++; // Increment message counter
@@ -453,9 +478,15 @@ void writeBuffer() {
 
 #if DEBUG
   printUnion();
-  printUnionBinary(); // Print union/structure in hex/binary
-  printTransmitBuffer();  // Print transmit buffer in hex/binary
+  //printUnionBinary(); // Print union/structure in hex/binary
+  //printTransmitBuffer();  // Print transmit buffer in hex/binary
+  Serial.println(transmitCounter);
 #endif
+}
+
+// Transmit data
+void transmitData() {
+  Serial.println(F("Transmit data"));
 }
 
 // Print current time and date
@@ -483,21 +514,7 @@ void blink(uint8_t ledPin, uint8_t flashes, uint16_t interval) {
   }
 }
 
-// Calculate statistics and clear objects
-void calculateStatistics() {
 
-  // Write  statistics data to union
-  message.pitch   = pitchStats.average()      * 100;  // Pitch mean
-  message.roll    = rollStats.average()       * 100;  // Roll mean
-  message.heading = headingStats.average()    * 100;  // Heading mean
-  message.voltage     = batteryStats.minimum()    * 1000; // Minimum battery voltage (mV)
-
-  // Clear statistics objects
-  batteryStats.clear();
-  pitchStats.clear();
-  rollStats.clear();
-  headingStats.clear();
-}
 
 // Set up the WDT to perform a system reset if the loop() blocks for more than 16 seconds
 void configureWatchdog() {
