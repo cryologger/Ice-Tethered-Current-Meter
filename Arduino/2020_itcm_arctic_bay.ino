@@ -1,17 +1,16 @@
 /*
-  Title:    Cryologger - Current tilt meter V1
-  Date:     January 29, 2020
+  Title:    Cryologger - Ice Tethered Current Meter v1
+  Date:     March 3, 2020
   Author:   Adam Garbo
 
     Components:
     - SparkFun Qwiic Micro - SAMD21 Development Board
     - SparkFun Real Time Clock Module - RV-1805 (Qwiic)
     - SparkFun Atmospheric Sensor Breakout - BME280 (Qwiic)
-    - SparkFun GPS Breakout - ZOE-M8Q (Qwiic)
+    - SparkFun GPS Breakout - SAM-M8Q (Qwiic)
     - SparkFun Qwiic Iridium 9603N
     - Maxtena M1621HCT-P-SMA Iridium antenna
-    - Maxtena M1516HCT-P-SMA antenna
-    - Adafruit Triple-axis Accelerometer+Magnetometer Board - LSM303
+    - SparkFun 9DoF Sensor Stick
     - SparkFun Buck-Boost Converter
 
   Comments:
@@ -21,32 +20,37 @@
 // Libraries
 #include <Wire.h>                           // https://www.arduino.cc/en/Reference/Wire
 #include <TimeLib.h>                        // https://github.com/PaulStoffregen/Time
+#include <Statistic.h>                      // https://github.com/RobTillaart/Arduino/tree/master/libraries/Statistic
 #include <SparkFun_Ublox_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
 #include <SparkFun_RV1805.h>                // https://github.com/sparkfun/SparkFun_RV-1805_Arduino_Library
 #include <SparkFunLSM9DS1.h>                // https://github.com/sparkfun/SparkFun_LSM9DS1_Arduino_Library
 #include <SparkFunBME280.h>                 // https://github.com/sparkfun/SparkFun_BME280_Arduino_Library
+#include <SAMD_AnalogCorrection.h>          // https://github.com/arduino/ArduinoCore-samd/tree/master/libraries/SAMD_AnalogCorrection
 #include <IridiumSBD.h>                     // https://github.com/PaulZC/IridiumSBD
+#include <math.h>                           // https://www.nongnu.org/avr-libc/user-manual/group__avr__math.html
 #include <ArduinoLowPower.h>                // https://github.com/arduino-libraries/ArduinoLowPower
 
 // Defined constants
 #define Serial        SerialUSB   // Required by SparkFun Qwiic Micro 
-#define IridiumWire   Wire        // 
-#define GPS_INT_PIN   5           // Pin to control ON/OFF operation of ZOE-M8Q
-#define RTC_INT_PIN   4           // RTC interrupt pin on D4
-#define DEBUG         true        // Output debugging messages to Serial Monitor
+#define IridiumWire   Wire
+#define GPS_INT_PIN   7           // Pin: Controls ON/OFF operation of ZOE-M8Q
+#define RTC_INT_PIN   4           // Pin: RTC interrupts
+#define VBAT_PIN      A0          // Pin: Battery voltage divider
+#define DEBUGGING     true        // Output debugging messages to Serial Monitor
 #define DIAGNOSTICS   true        // Output Iridium diagnostic messages to Serial Monitor
 
 // Object instantiations
 IridiumSBD    modem(IridiumWire); // I2C Address: 0x63
 RV1805        rtc;                // I2C Address: 0x69
 SFE_UBLOX_GPS gps;                // I2C Address: 0x42
+LSM9DS1       imu;                // I2C Address: 0x1E (Magnetometer), 0x6B (Accelerometer)
 
 // User defined global variable declarations
 uint32_t      alarmInterval         = 1800;   // RTC sleep duration in seconds (Default: 3600 seconds)
-uint32_t      sampleInterval        = 120;    // Duration in seconds of current tilt measurements
-uint8_t       sampleFrequency       = 1;      // Sampling frequecny in seconds of current tilt measurements
-uint8_t       transmitInterval      = 1;      // Number of messages in each Iridium transmission (Limit: 340 bytes)
-uint8_t       maxRetransmitCounter  = 13;     // Number of failed messages to reattempt in each Iridium transmission (Limit: 340 bytes)
+uint32_t      sampleInterval        = 120;    // Sampling duration of current tilt measurements (seconds)
+uint8_t       sampleFrequency       = 1000;      // Sampling frequency of current tilt measurements (milliseconds)
+uint8_t       transmitInterval      = 1;      // Number of messages in each Iridium transmission (340-byte limit)
+uint8_t       maxRetransmitCounter  = 13;     // Number of failed messages to reattempt in each Iridium transmission (340-byte limit)
 
 // Global variable and constant declarations
 bool          ledState              = LOW;    // Flag to toggle LED in blinkLed() function
@@ -80,35 +84,53 @@ Statistic batteryStats;   // Battery voltage statistics
 Statistic pitchStats;     // Pitch statistics
 Statistic rollStats;      // Roll statistics
 Statistic headingStats;   // Heading statistics
+Statistic axStats;
+Statistic ayStats;
+Statistic azStats;
+Statistic mxStats;
+Statistic myStats;
+Statistic mzStats;
+Statistic gxStats;
+Statistic gyStats;
+Statistic gzStats;
 
 // Structure and union to store and send data byte-by-byte via RockBLOCK
 typedef union {
   struct {
-    uint32_t  unixtime;           // Unix epoch                     (4 bytes)
-    int16_t   pitch;              // Pitch (°)                      (2 bytes)
-    int16_t   roll;               // Roll (°)                       (2 bytes)
-    uint16_t  heading;            // Tilt-compensated heading (°)   (2 bytes)
-    int32_t   latitude;           // Latitude (DD)                  (4 bytes)
-    int32_t   longitude;          // Longitude (DD)                 (4 bytes)
-    uint8_t   satellites;         // # of satellites                (1 byte)
-    uint16_t  pdop;               // PDOP                           (2 bytes)
-    uint16_t  voltage;            // Battery voltage (mV)           (2 bytes)
-    uint16_t  transmitDuration;   // Previous message duration      (2 bytes)
-    uint16_t  messageCounter;     // Message counter                (2 bytes)
-  } __attribute__((packed));                                     // (27-byte message)
-  uint8_t bytes[27]; // To do: Look into flexible arrays in structures
+    uint32_t  unixtime;           // Unix epoch time            (4 bytes)
+    int16_t   pitch;              // Pitch mean                 (2 bytes)
+    int16_t   roll;               // Roll mean                  (2 bytes)
+    uint16_t  heading;            // Heading mean               (2 bytes)
+    int16_t   ax;                 // Accelerometer x            (2 bytes)
+    int16_t   ay;                 // Accelerometer y            (2 bytes)
+    int16_t   az;                 // Accelerometer z            (2 bytes)
+    int16_t   mx;                 // Magnetometer x             (2 bytes)
+    int16_t   my;                 // Magnetometer y             (2 bytes)
+    int16_t   mz;                 // Magnetometer z             (2 bytes)
+    int16_t   gx;                 // Gyroscope x                (2 bytes)
+    int16_t   gy;                 // Gyroscope y                (2 bytes)
+    int16_t   gz;                 // Gyroscope z                (2 bytes)
+    int32_t   latitude;           // Latitude                   (4 bytes)
+    int32_t   longitude;          // Longitude                  (4 bytes)
+    uint8_t   satellites;         // # of satellites            (1 byte)
+    uint16_t  pdop;               // PDOP                       (2 bytes)
+    uint16_t  voltage;            // Battery voltage (mV)       (2 bytes)
+    uint16_t  transmitDuration;   // Previous message duration  (2 bytes)
+    uint16_t  messageCounter;     // Message counter            (2 bytes)
+  } __attribute__((packed));                                // (45-byte message)
+  uint8_t bytes[45]; // To do: Look into flexible arrays in structures
 } SBDMESSAGE;
 
 SBDMESSAGE message;
 size_t messageSize = sizeof(message);   // Size (in bytes) of data message to be transmitted
 
 // Setup
-
 void setup() {
 
   // Pin assignments
   pinMode(GPS_INT_PIN, OUTPUT);
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(VBAT_PIN, INPUT);
   digitalWrite(GPS_INT_PIN, HIGH);
   digitalWrite(LED_BUILTIN, LOW);
 
@@ -119,8 +141,8 @@ void setup() {
   // Configure Watchdog Timer
   configureWatchdog();
 
-  Serial.println(F("Cryologger - Current Tilt Metre V1"));
-  Serial.println(F("----------------------------------"));
+  Serial.println(F("Cryologger - Ice Tethered Current Meter v1"));
+  Serial.println(F("------------------------------------------"));
 
   // I2C Configuration
   Wire.begin();           // Initialize I2C
@@ -143,7 +165,11 @@ void setup() {
     //rtc.disableTrickleCharge();             // Disable capacitor trickle charger
     rtc.set24Hour();                        // Set RTC to 24-hour format
     rtc.setAlarm(0, 0, 0, 0, 0);            // Set the alarm (seconds, minutes, hours, day, month)
-    rtc.setAlarmMode(5);                    // Set alarm mode (select mode 5 for deployments)
+#if DEBUGGING
+    rtc.setAlarmMode(6);                    // Select initial alarm mode (mode 6 for debugging)
+#else if DEPLOYED
+    rtc.setAlarmMode(5);                    // Select initial alarm mode (mode 5 for deployment)
+#endif
     rtc.enableInterrupt(INTERRUPT_AIE);     // Enable the Alarm Interrupt
     rtc.updateTime();                       // Update time variable from RTC registers
 
@@ -155,14 +181,12 @@ void setup() {
     Serial.println(F("SparkFun RV-1805 RTC not connected! Please check wiring."));
   }
 
-  // Adafruit LSM303 Configuration
-  if (imu.init()) {
-    Serial.println(F("LSM303 initalized."));
+  // SparkFun 9DoF Sensor Stick
+  if (imu.begin() == true) {
+    Serial.println(F("SparkFun 9DoF Sensor Stick initalized."));
   }
   else {
-    Serial.println(F("Warning: Unable to initialize LSM303."));
-    digitalWrite(LED_PIN, HIGH);
-    while (1);
+    Serial.println(F("Warning: Unable to initialize SparkFun 9DoF Sensor Stick."));
   }
 
   // SparkFun ZOE-M8Q Configuration
@@ -180,20 +204,25 @@ void setup() {
   // SparkFun Qwiic Iridium 9603N Configuration
   if (modem.isConnected()) {
     Serial.println(F("SparkFun Qwiic Iridium 9603N detected."));
-    //modem.setPowerProfile(IridiumSBD::USB_POWER_PROFILE); // Assume 'USB' power (slow recharge)
-    modem.adjustSendReceiveTimeout(180);   // Set send/receive timeout (Default = 300 seconds)
+    modem.adjustSendReceiveTimeout(180);  // Set send/receive timeout (Default = 300 seconds)
     modem.enable841lowPower(true);        // Enable ATtiny841 low-power mode
   }
   else {
     Serial.println(F("Qwiic Iridium 9603N not connected! Please check wiring."));
   }
 
-#if DEBUG
-  Serial.print("Setup: "); Serial.println(rtc.stringTimeStamp());  // Print date and time in ISO 8601 format
-  Serial.print("Alarm: "); alarmTimeStamp();
-#endif
-}
+  // Print date and time in ISO 8601 format
+  Serial.println(rtc.stringTimeStamp());
 
+  // Print operating mode
+  Serial.print(F("MODE: "));
+#if DEBUGGING
+  Serial.println(F("DEBUG"));
+#else if DEPLOYED
+  Serial.println(F("DEPLOYMENT"));
+#endif
+
+}
 
 // Loop
 void loop() {
@@ -202,91 +231,107 @@ void loop() {
   if (alarmFlag) {
 
     // Confirm alarm flag was set and not a false trigger (will reset alarm flag if set)
-    if (rtc.status() & 0x04) { // Alarm Flag bit in register 0Fh will be set to 1: 0b00000100 (0x04)
+    if (rtc.status() & (1 << 2)) { // Alarm Flag (bit 2) in register 0Fh will be set to 1: 0b00000100
 
       // Read the RTC
       readRtc();
-      
+
       // Pet the Watchdog Timer
-      petDog(); 
-      
+      petDog();
+
       // Print date and time in ISO 8601 format
       Serial.print("Alarm trigger: "); Serial.println(rtc.stringTimeStamp());
-      
+
       // Perform measurements for 2 minutes
       uint32_t loopStartTime = millis();
       while (millis() - loopStartTime < sampleInterval * 60UL * 1000UL) {
-        petDog();       // Pet the dog
-        readBattery();  // Read battery
-        readImu();      // Read IMU
-        blinkLed(LED_PIN, 1, sampleFrequency);
+        petDog();         // Pet the dog
+        readImu();        // Read IMU
+        blinkLed(1, 10);  // Blink LED
+        LowPower.deepSleep(sampleFrequency); // Go to sleep to reduce current draw
       }
-      
+
       // Read GPS
       readGps();
-      
+
       // Perform statistics on measurements
       printStatistics();
       calculateStatistics();
 
-      // Write data to transmit buffer array
+      // Write data to buffer
       writeBuffer();
 
       // Check if data should be transmitted
       if (transmitCounter == transmitInterval) {
-        transmitData();
-        transmitCounter = 0;
+        transmitData();       // Transmit data
+        transmitCounter = 0;  // Reset transmit counter
       }
-      
+
       // Set RTC alarm
       alarmTime = unixtime + alarmInterval; // Calculate next alarm
       rtc.setAlarm(0, minute(alarmTime), hour(alarmTime), day(alarmTime), month(alarmTime));
       rtc.setAlarmMode(2); // Set alarm mode to seconds, minutes, hours and day match (once per month)
 
-      // Check if alarm was set in the past
+      // Check if alarm was set in the past or the RTC was synced with GPS time
       if (alarmTime <= getEpoch()) {
         Serial.println(F("Warning! Alarm set in the past."));
         alarmTime = getEpoch() + alarmInterval; // Calculate new alarm
 
-        // Set alarm to next closest alarm interval
+        // Set alarm to next closest hour interval
         rtc.setAlarm(0, 0, (hour(alarmTime) + ((alarmInterval / 3600) - (hour(alarmTime) % (alarmInterval / 3600)))) % 24, 0, 0);
         rtc.setAlarmMode(4); // Set alarm mode to seconds, minutes and hours match (once per day)
         setRtcFlag = false;
       }
       rtc.enableInterrupt(INTERRUPT_AIE); // Enable Alarm Interrupt
+
       Serial.print(F("Next alarm: ")); alarmTimeStamp();
     }
     alarmFlag = false; // Clear alarm interrupt service routine flag
   }
   sleepFlag = true; // Set Watchdog Timer sleep flag
+
+#if DEBUG
+  blinkLed(1, 500);
+#endif
+
+#if DEPLOYED
   blinkLed(1, 10);
   LowPower.deepSleep(); // Enter deep sleep
+#endif
 }
 
-// Measure battery voltage from 100/100 kOhm divider
-void readBattery() {
-
+// Measure battery voltage from 100 kOhm / 1 MOhm voltage divider
+void readBattery()
+{
   // Start loop timer
-  uint32_t loopStartTime = millis(); 
+  uint32_t loopStartTime = millis();
 
-  voltage = 0.0;
-  analogReadResolution(12);
-  for (uint8_t i = 0; i < 10; i++) {
+  float voltage = 0.0;
+  analogReadResolution(12); // Change the resolution to 12 bits
+
+  // ADC offset and gain correction values
+  //analogReadCorrection(15, 2056);
+
+  // Read voltage
+  for (uint8_t i = 0; i < 10; ++i) {
     voltage += analogRead(VBAT_PIN);
-    delay(1);
+    delay(5);
   }
 
-  voltage /= 10;    // Average readings
-  voltage *= 2;     // Multiply back
+  // Average samples
+  voltage /= 10;
+  voltage *= ((1000000.0 + 100000.0) / 100000.0); // Multiply back 100,000 / (1,000,000 + 100,000)
   voltage *= 3.3;   // Multiply by 3.3V reference voltage
   voltage /= 4096;  // Convert to voltage
 
-  // Add to statistics object
-  batteryStats.add(voltage);
+  // Write data to union
+  message.voltage = voltage * 1000;
+
+  Serial.print("Voltage: "); Serial.println(voltage);
 
   // Stop loop timer
   uint32_t loopEndTime = millis() - loopStartTime;
-  Serial.print(F("readBattery() executed in: ")); Serial.print(loopEndTime); Serial.println(F(" ms"));
+  Serial.print("readBattery() function execution: "); Serial.print(loopEndTime); Serial.println(F(" ms"));
 }
 
 // Read SparkFun RV-1805 RTC
@@ -321,12 +366,12 @@ uint32_t getEpoch() {
   tm.Day    = rtc.getDate();
   tm.Month  = rtc.getMonth();
   tm.Year   = rtc.getYear() + 30; // Offset from 2000 - 1970
-  time_t t = makeTime(tm);
+  time_t t  = makeTime(tm);
 
   return t;
 }
 
-// Print alarm timestamp
+// Print RTC alarm timestamp from registers
 void alarmTimeStamp () {
   char alarmBuffer[25];
   snprintf(alarmBuffer, sizeof(alarmBuffer), "2020-%02d-%02dT%02d:%02d:%02d",
@@ -346,48 +391,32 @@ void alarmIsr() {
 // Read pitch, roll and tilt-compensated heading
 void readImu() {
 
-  uint32_t loopStartTime = millis(); // Loop timer
+  // Start loop timer
+  uint32_t loopStartTime = millis();
 
-  imu.enableDefault();  // Enable accelerometer and magnetometer
-  delay(1);             // Turn-on delay
+  float ax, ay, az, mx, my, mz, gx, gy, gz, pitch, roll, heading;
   /*
-    Calibration values: the default values of +/-32767 for each axis lead to an assumed
-    magnetometer bias of 0. Use the Pololu LSM303 library Calibrate example program to
-    determine appropriate values for each LSM303 sensor.
+    Insert IMU code here
   */
-
-  imu.m_min = (LSM303::vector<int16_t>) {
-    //-32767, -32767, -32767  // Default
-    -702, -778, -802          // Test unit
-  };
-  imu.m_max = (LSM303::vector<int16_t>) {
-    //+32767, +32767, +32767  // Default
-    +771, +777, +658          // Test unit
-  };
-
-  // Read LSM303
-  imu.read();
-
-  // Calculate orientation
-  pitch = atan2(-imu.a.x, sqrt((int32_t)imu.a.y * imu.a.y + (int32_t)imu.a.z * imu.a.z)) * 180 / PI;
-  roll = atan2(imu.a.y, imu.a.z) * 180 / PI;
-  heading = imu.heading((LSM303::vector<int>) {
-    1, 0, 0   // PCB orientation
-  });
 
   // Add to statistics object
   pitchStats.add(pitch);
   rollStats.add(roll);
   headingStats.add(heading);
 
-  // Place accelerometer in power-down mode
-  imu.writeAccReg(0x20, 0x00); // CTRL_REG1_A = 0b00000000
+  axStats.add(imu.ax);
+  ayStats.add(imu.ay);
+  azStats.add(imu.az);
+  mxStats.add(imu.mx);
+  myStats.add(imu.my);
+  mzStats.add(imu.mz);
+  gxStats.add(imu.gx);
+  gyStats.add(imu.gy);
+  gzStats.add(imu.gz);
 
-  // Place magenteometer in sleep-mode
-  imu.writeMagReg(0x02, 0x03); // MR_REG_M = 0b00000011
-
-  uint32_t loopEndTime = millis() - loopStartTime; // Loop timer
-  //Serial.print(F("readImu() executed in: ")); Serial.print(loopEndTime); Serial.println(F(" ms"));
+  // Stop loop timer
+  uint32_t loopEndTime = millis() - loopStartTime;
+  Serial.print(F("readImu() executed in: ")); Serial.print(loopEndTime); Serial.println(F(" ms"));
 }
 
 // Read SparkFun ZOE-M8Q
@@ -402,16 +431,13 @@ void readGps() {
   // Wake up the receiver
   digitalWrite(GPS_INT_PIN, HIGH);
 
-  // Blink LED
-  blinkLed(2, 100);
-
   // Begin listening to the GPS
   Serial.println(F("Beginning to listen for GPS traffic..."));
 
   // Look for GPS signal for up to 2 minutes
   while (!fixFound && millis() - loopStartTime < 1UL * 60UL * 1000UL) {
 
-#ifdef DEBUG
+#ifdef DEBUGGING
     int32_t latitude = gps.getLatitude();
     int32_t longitude = gps.getLongitude();
     uint16_t pdop = gps.getPDOP();
@@ -446,7 +472,7 @@ void readGps() {
       message.longitude = gps.getLongitude();
       message.satellites = gps.getSIV();
       message.pdop = gps.getPDOP();
-      message.fix = gps.getFixType();
+      //message.fix = gps.getFixType();
 
       // Check if RTC time should be set using GPS time
       if (setRtcFlag) {
@@ -454,8 +480,9 @@ void readGps() {
         Serial.print("Old time: "); Serial.println(rtc.stringTimeStamp());
         rtc.setTime(0, gps.getSecond(), gps.getMinute(), gps.getHour(),
                     gps.getDay(), gps.getMonth(), gps.getYear(), 0);
-        rtc.updateTime(); 
+        rtc.updateTime();
         Serial.print("RTC time set: "); Serial.println(rtc.stringTimeStamp());
+        setRtcFlag = false;
       }
     }
     ISBDCallback();
@@ -478,16 +505,34 @@ void readGps() {
 void calculateStatistics() {
 
   // Write  statistics data to union
-  message.pitch   = pitchStats.average()      * 100;  // Pitch mean
-  message.roll    = rollStats.average()       * 100;  // Roll mean
-  message.heading = headingStats.average()    * 100;  // Heading mean
-  message.voltage = batteryStats.minimum()    * 1000; // Battery voltage min
+  message.pitch     = pitchStats.average() * 100;     // Pitch mean
+  message.roll      = rollStats.average() * 100;      // Roll mean
+  message.heading   = headingStats.average() * 100;   // Heading mean
+  message.voltage   = batteryStats.average() * 1000;  // Battery voltage min
+  message.ax = axStats.average() * 100; //
+  message.ay = ayStats.average() * 100; //
+  message.az = azStats.average() * 100; //
+  message.mx = mxStats.average() * 100; //
+  message.my = myStats.average() * 100; //
+  message.mz = mzStats.average() * 100; //
+  message.gx = gxStats.average() * 100; //
+  message.gy = gyStats.average() * 100; //
+  message.gz = gzStats.average() * 100; //
 
   // Clear statistics objects
   batteryStats.clear();
   pitchStats.clear();
   rollStats.clear();
   headingStats.clear();
+  axStats.clear();
+  ayStats.clear();
+  azStats.clear();
+  mxStats.clear();
+  myStats.clear();
+  mzStats.clear();
+  gxStats.clear();
+  gyStats.clear();
+  gzStats.clear();
 }
 
 // Write union data to transmit buffer in preparation of data transmission
@@ -500,10 +545,10 @@ void writeBuffer() {
   memcpy(transmitBuffer + (sizeof(message) * (transmitCounter + (retransmitCounter * transmitInterval) - 1)),
          message.bytes, sizeof(message)); // Copy message to transmit buffer
 
-#if DEBUG
+#if DEBUGGING
   printUnion();
-  //printUnionBinary(); // Print union/structure in hex/binary
-  //printTransmitBuffer();  // Print transmit buffer in hex/binary
+  printUnionBinary(); // Print union/structure in hex/binary
+  printTransmitBuffer();  // Print transmit buffer in hex/binary
 #endif
 }
 
@@ -582,18 +627,22 @@ void transmitData() {
                                               (((uint32_t)inBuffer[2] << 8) & 0xFFFF) +
                                               (((uint32_t)inBuffer[1] << 16) & 0xFFFFFF) +
                                               (((uint32_t)inBuffer[0] << 24) & 0xFFFFFFFF);
-
         // Check if incoming data is valid
-        if ((alarmIntervalBuffer        >= 300  && alarmIntervalBuffer        <= 1209600) &&
-            (transmitIntervalBuffer     >= 1    && transmitIntervalBuffer     <= 24) &&
-            (maxRetransmitCounterBuffer >= 0    && maxRetransmitCounterBuffer <= 24) &&
-            (resetFlagBuffer            == 0    || resetFlagBuffer            == 255)) {
+        if ((alarmIntervalBuffer >= 300 && alarmIntervalBuffer <= 1209600) &&
+            (transmitIntervalBuffer >= 1 && transmitIntervalBuffer <= 24) &&
+            (maxRetransmitCounterBuffer >= 0 && maxRetransmitCounterBuffer <= 24) &&
+            (resetFlagBuffer == 0  || resetFlagBuffer == 255)) {
 
-          // Update variables
-          alarmInterval         = alarmIntervalBuffer;        // Update alarm interval
-          transmitInterval      = transmitIntervalBuffer;     // Update transmit interval
-          maxRetransmitCounter  = maxRetransmitCounterBuffer; // Update max retransmit counter
-          resetFlag             = resetFlagBuffer;            // Update force reset flag
+          // Update global variables
+          alarmInterval = alarmIntervalBuffer;                // Update alarm interval
+          transmitInterval = transmitIntervalBuffer;          // Update transmit interval
+          maxRetransmitCounter = maxRetransmitCounterBuffer;  // Update max retransmit counter
+          resetFlag = resetFlagBuffer;                        // Update force reset flag
+
+          Serial.print(F("alarmInterval: ")); Serial.println(alarmInterval);
+          Serial.print(F("transmitInterval: ")); Serial.println(transmitInterval);
+          Serial.print(F("maxRetransmitCounter: ")); Serial.println(maxRetransmitCounter);
+          Serial.print(F("resetFlag: ")); Serial.println(resetFlag);
         }
       }
 
@@ -639,21 +688,17 @@ void transmitData() {
   Serial.println(F("Disabling the supercapacitor charger..."));
   modem.enableSuperCapCharger(false);
 
+  // Turn LED off
+  digitalWrite(LED_BUILTIN, LOW);
+
   // Stop loop timer
   uint32_t loopEndTime = millis() - loopStartTime;
   Serial.print(F("transmitData() function execution: ")); Serial.print(loopEndTime); Serial.println(F(" ms"));
 
   // Write data to union
   message.transmitDuration = loopEndTime / 1000;
-
-  Serial.print(F("transmitDuration: ")); Serial.println(loopEndTime / 1000);
+  
   Serial.print(F("retransmitCounter: ")); Serial.println(retransmitCounter);
-
-  // Print inBuffer variables
-  Serial.print(F("alarmInterval: ")); Serial.println(alarmInterval);
-  Serial.print(F("transmitInterval: ")); Serial.println(transmitInterval);
-  Serial.print(F("maxRetransmitCounter: ")); Serial.println(maxRetransmitCounter);
-  Serial.print(F("resetFlag: ")); Serial.println(resetFlag);
 
   // Check if reset flag was transmitted
   if (resetFlag == 255) {
@@ -690,7 +735,7 @@ void blinkLED(unsigned long interval) {
 // RockBLOCK callback function
 bool ISBDCallback() {
   petDog(); // Pet the Watchdog
-  blinkLED(500);
+  blinkLED(1000);
   return true;
 }
 
@@ -708,24 +753,52 @@ void ISBDDiagsCallback(IridiumSBD * device, char c) {
 #endif
 }
 
+// Print statistics
+void printStatistics() {
+  Serial.println(F("-------------------------------------------------------------------------"));
+  Serial.println(F("Statistics"));
+  Serial.println(F("-------------------------------------------------------------------------"));
+  Serial.println(F("Voltage:"));
+  Serial.print(F("Samples: ")); Serial.print(batteryStats.count());
+  Serial.print(F("\tMin: "));   Serial.print(batteryStats.minimum());
+  Serial.print(F("\tMax: ")); Serial.print(batteryStats.maximum());
+  Serial.print(F("\tMean: ")); Serial.print(batteryStats.average());
+  Serial.print(F("\tSD: ")); Serial.println(batteryStats.unbiased_stdev());
+  Serial.println(F("Pitch:"));
+  Serial.print(F("Samples: ")); Serial.print(pitchStats.count());
+  Serial.print(F("\tMin: ")); Serial.print(pitchStats.minimum());
+  Serial.print(F("\tMax: ")); Serial.print(pitchStats.maximum());
+  Serial.print(F("\tMean: ")); Serial.print(pitchStats.average());
+  Serial.print(F("\tSD: ")); Serial.println(pitchStats.unbiased_stdev());
+  Serial.println(F("Roll:"));
+  Serial.print(F("Samples: ")); Serial.print(rollStats.count());
+  Serial.print(F("\tMin: ")); Serial.print(rollStats.minimum());
+  Serial.print(F("\tMax: ")); Serial.print(rollStats.maximum());
+  Serial.print(F("\tMean: ")); Serial.print(rollStats.average());
+  Serial.print(F("\tSD: ")); Serial.println(rollStats.unbiased_stdev());
+  Serial.println(F("Heading:"));
+  Serial.print(F("Samples: ")); Serial.print(headingStats.count());
+  Serial.print(F("\tMin: ")); Serial.print(headingStats.minimum());
+  Serial.print(F("\tMax: ")); Serial.print(headingStats.maximum());
+  Serial.print(F("\tMean: ")); Serial.print(headingStats.average());
+  Serial.print(F("\tSD: ")); Serial.println(headingStats.unbiased_stdev());
+}
+
 // Print union/structure
 void printUnion() {
   Serial.println(F("-----------------------------------"));
   Serial.println(F("Union/structure"));
   Serial.println(F("-----------------------------------"));
   Serial.print(F("unixtime:\t\t")); Serial.println(message.unixtime);
-  Serial.print(F("temperature:\t\t")); Serial.println(message.temperature);
-  Serial.print(F("pressure:\t\t")); Serial.println(message.pressure);
-  Serial.print(F("humidity:\t\t")); Serial.println(message.humidity);
-  //Serial.print(F("pitch:\t\t\t")); Serial.println(message.pitch);
-  //Serial.print(F("roll:\t\t\t")); Serial.println(message.roll);
-  //Serial.print(F("heading:\t\t")); Serial.println(message.heading);
+  //Serial.print(F("temperature:\t\t")); Serial.println(message.temperature);
+  Serial.print(F("pitch:\t\t\t")); Serial.println(message.pitch);
+  Serial.print(F("roll:\t\t\t")); Serial.println(message.roll);
+  Serial.print(F("heading:\t\t")); Serial.println(message.heading);
   Serial.print(F("latitude:\t\t")); Serial.println(message.latitude);
   Serial.print(F("longitude:\t\t")); Serial.println(message.longitude);
   Serial.print(F("satellites:\t\t")); Serial.println(message.satellites);
   Serial.print(F("pdop:\t\t\t")); Serial.println(message.pdop);
-  Serial.print(F("fix:\t\t\t")); Serial.println(message.fix);
-  //Serial.print(F("voltage:\t\t")); Serial.println(message.voltage);
+  Serial.print(F("voltage:\t\t")); Serial.println(message.voltage);
   Serial.print(F("transmitDuration:\t")); Serial.println(message.transmitDuration);
   Serial.print(F("messageCounter:\t\t")); Serial.println(message.messageCounter);
   Serial.println(F("-----------------------------------"));
