@@ -1,6 +1,6 @@
 /*
   Title:    Cryologger - Ice Tethered Current Meter v1
-  Date:     March 3, 2020
+  Date:     March 4, 2020
   Author:   Adam Garbo
 
     Components:
@@ -33,11 +33,12 @@
 // Defined constants
 #define Serial        SerialUSB   // Required by SparkFun Qwiic Micro 
 #define IridiumWire   Wire
-#define GPS_INT_PIN   7           // Pin: Controls ON/OFF operation of ZOE-M8Q
-#define RTC_INT_PIN   4           // Pin: RTC interrupts
-#define VBAT_PIN      A0          // Pin: Battery voltage divider
+#define GPS_INT_PIN   7           // Pin for controlling ON/OFF operation of SAM-M8Q
+#define RTC_INT_PIN   4           // Pin for RTC interrupts
+#define VBAT_PIN      A0          // Pin for measuring battery voltage
 #define DEBUGGING     true        // Output debugging messages to Serial Monitor
 #define DIAGNOSTICS   true        // Output Iridium diagnostic messages to Serial Monitor
+#define DEPLOYED      true        // Configuration for deployment
 
 // Object instantiations
 IridiumSBD    modem(IridiumWire); // I2C Address: 0x63
@@ -46,29 +47,29 @@ SFE_UBLOX_GPS gps;                // I2C Address: 0x42
 LSM9DS1       imu;                // I2C Address: 0x1E (Magnetometer), 0x6B (Accelerometer)
 
 // User defined global variable declarations
-uint32_t      alarmInterval         = 1800;   // RTC sleep duration in seconds (Default: 3600 seconds)
-uint32_t      sampleInterval        = 120;    // Sampling duration of current tilt measurements (seconds)
-uint8_t       sampleFrequency       = 1000;      // Sampling frequency of current tilt measurements (milliseconds)
-uint8_t       transmitInterval      = 1;      // Number of messages in each Iridium transmission (340-byte limit)
-uint8_t       maxRetransmitCounter  = 13;     // Number of failed messages to reattempt in each Iridium transmission (340-byte limit)
+unsigned long alarmInterval         = 1800;   // RTC sleep duration in seconds (Default: 3600 seconds)
+unsigned long sampleInterval        = 120;    // Sampling duration of current tilt measurements (seconds)
+byte          sampleFrequency       = 1000;      // Sampling frequency of current tilt measurements (milliseconds)
+byte          transmitInterval      = 1;      // Number of messages in each Iridium transmission (340-byte limit)
+byte          maxRetransmitCounter  = 13;     // Number of failed messages to reattempt in each Iridium transmission (340-byte limit)
 
 // Global variable and constant declarations
 bool          ledState              = LOW;    // Flag to toggle LED in blinkLed() function
 bool          setRtcFlag            = true;   // Flag to determine if RTC should be set using GPS time
 volatile bool sleepFlag             = false;  // Flag to indicate to Watchdog Timer if in deep sleep mode
 volatile bool alarmFlag             = false;  // Flag for alarm interrupt service routine
-uint8_t       resetFlag             = 0;      // Flag to force system reset using Watchdog Timer
-uint8_t       transmitBuffer[340]   = {};     // Qwiic 9603N transmission buffer
-uint16_t      messageCounter        = 0;      // Qwiic 9603N transmitted message counter
-uint16_t      retransmitCounter     = 0;      // Qwiic 9603N failed data transmission counter
-uint16_t      transmitCounter       = 0;      // Qwiic 9603N transmission interval counter
-uint32_t      previousMillis        = 0;      // GLobal millis() timer variable
+byte          resetFlag             = 0;      // Flag to force system reset using Watchdog Timer
+byte          transmitBuffer[340]   = {};     // Qwiic 9603N transmission buffer
+unsigned int  messageCounter        = 0;      // Qwiic 9603N transmitted message counter
+unsigned int  retransmitCounter     = 0;      // Qwiic 9603N failed data transmission counter
+unsigned int  transmitCounter       = 0;      // Qwiic 9603N transmission interval counter
+unsigned long previousMillis        = 0;      // Global millis() timer variable
 time_t        alarmTime             = 0;
 time_t        unixtime              = 0;
 tmElements_t  tm;
 
 // Configure u-blox M8Q receiver for ON/OFF operation (UBX-CFG-PM2)
-static uint8_t ubxCfgPm2_payload[] = {
+static byte ubxCfgPm2_payload[] = {
   0x01, 0x06, 0x00, 0x00, 0x6E, 0x00, 0x42, 0x01, 0xE8, 0x03, 0x00,
   0x00, 0x10, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x2C, 0x01, 0x00, 0x00, 0x4F, 0xC1, 0x03, 0x00, 0x86,
@@ -97,28 +98,28 @@ Statistic gzStats;
 // Structure and union to store and send data byte-by-byte via RockBLOCK
 typedef union {
   struct {
-    uint32_t  unixtime;           // Unix epoch time            (4 bytes)
-    int16_t   pitch;              // Pitch mean                 (2 bytes)
-    int16_t   roll;               // Roll mean                  (2 bytes)
-    uint16_t  heading;            // Heading mean               (2 bytes)
-    int16_t   ax;                 // Accelerometer x            (2 bytes)
-    int16_t   ay;                 // Accelerometer y            (2 bytes)
-    int16_t   az;                 // Accelerometer z            (2 bytes)
-    int16_t   mx;                 // Magnetometer x             (2 bytes)
-    int16_t   my;                 // Magnetometer y             (2 bytes)
-    int16_t   mz;                 // Magnetometer z             (2 bytes)
-    int16_t   gx;                 // Gyroscope x                (2 bytes)
-    int16_t   gy;                 // Gyroscope y                (2 bytes)
-    int16_t   gz;                 // Gyroscope z                (2 bytes)
-    int32_t   latitude;           // Latitude                   (4 bytes)
-    int32_t   longitude;          // Longitude                  (4 bytes)
-    uint8_t   satellites;         // # of satellites            (1 byte)
-    uint16_t  pdop;               // PDOP                       (2 bytes)
-    uint16_t  voltage;            // Battery voltage (mV)       (2 bytes)
-    uint16_t  transmitDuration;   // Previous message duration  (2 bytes)
-    uint16_t  messageCounter;     // Message counter            (2 bytes)
+    unsigned long unixtime;           // Unix epoch time            (4 bytes)
+    int           pitch;              // Pitch mean                 (2 bytes)
+    int           roll;               // Roll mean                  (2 bytes)
+    unsigned int  heading;            // Heading mean               (2 bytes)
+    int           ax;                 // Accelerometer x            (2 bytes)
+    int           ay;                 // Accelerometer y            (2 bytes)
+    int           az;                 // Accelerometer z            (2 bytes)
+    int           mx;                 // Magnetometer x             (2 bytes)
+    int           my;                 // Magnetometer y             (2 bytes)
+    int           mz;                 // Magnetometer z             (2 bytes)
+    int           gx;                 // Gyroscope x                (2 bytes)
+    int           gy;                 // Gyroscope y                (2 bytes)
+    int           gz;                 // Gyroscope z                (2 bytes)
+    long          latitude;           // Latitude                   (4 bytes)
+    long          longitude;          // Longitude                  (4 bytes)
+    byte          satellites;         // # of satellites            (1 byte)
+    unsigned int  pdop;               // PDOP                       (2 bytes)
+    unsigned int  voltage;            // Battery voltage (mV)       (2 bytes)
+    unsigned int  transmitDuration;   // Previous message duration  (2 bytes)
+    unsigned int  messageCounter;     // Message counter            (2 bytes)
   } __attribute__((packed));                                // (45-byte message)
-  uint8_t bytes[45]; // To do: Look into flexible arrays in structures
+  byte bytes[45]; // To do: Look into flexible arrays in structures
 } SBDMESSAGE;
 
 SBDMESSAGE message;
@@ -243,7 +244,7 @@ void loop() {
       Serial.print("Alarm trigger: "); Serial.println(rtc.stringTimeStamp());
 
       // Perform measurements for 2 minutes
-      uint32_t loopStartTime = millis();
+      unsigned long loopStartTime = millis();
       while (millis() - loopStartTime < sampleInterval * 60UL * 1000UL) {
         petDog();         // Pet the dog
         readImu();        // Read IMU
@@ -304,7 +305,7 @@ void loop() {
 void readBattery()
 {
   // Start loop timer
-  uint32_t loopStartTime = millis();
+  unsigned long loopStartTime = millis();
 
   float voltage = 0.0;
   analogReadResolution(12); // Change the resolution to 12 bits
@@ -313,7 +314,7 @@ void readBattery()
   //analogReadCorrection(15, 2056);
 
   // Read voltage
-  for (uint8_t i = 0; i < 10; ++i) {
+  for (byte i = 0; i < 10; ++i) {
     voltage += analogRead(VBAT_PIN);
     delay(5);
   }
@@ -330,7 +331,7 @@ void readBattery()
   Serial.print("Voltage: "); Serial.println(voltage);
 
   // Stop loop timer
-  uint32_t loopEndTime = millis() - loopStartTime;
+  unsigned long loopEndTime = millis() - loopStartTime;
   Serial.print("readBattery() function execution: "); Serial.print(loopEndTime); Serial.println(F(" ms"));
 }
 
@@ -338,7 +339,7 @@ void readBattery()
 void readRtc() {
 
   // Start loop timer
-  uint32_t loopStartTime = micros();
+  unsigned long loopStartTime = micros();
 
   // Get UNIX Epoch time
   unixtime = getEpoch();
@@ -348,12 +349,12 @@ void readRtc() {
   Serial.print("Epoch time: "); Serial.println(unixtime);
 
   // Stop loop timer
-  uint32_t loopEndTime = micros() - loopStartTime;
+  unsigned long loopEndTime = micros() - loopStartTime;
   Serial.print(F("readRtc() function execution: ")); Serial.print(loopEndTime); Serial.println(F(" μs"));
 }
 
 // Convert date and time to Unix Epoch time
-uint32_t getEpoch() {
+unsigned long getEpoch() {
 
   // Update the local array with the RTC registers
   rtc.updateTime();
@@ -392,7 +393,7 @@ void alarmIsr() {
 void readImu() {
 
   // Start loop timer
-  uint32_t loopStartTime = millis();
+  unsigned long loopStartTime = millis();
 
   float ax, ay, az, mx, my, mz, gx, gy, gz, pitch, roll, heading;
   /*
@@ -415,7 +416,7 @@ void readImu() {
   gzStats.add(imu.gz);
 
   // Stop loop timer
-  uint32_t loopEndTime = millis() - loopStartTime;
+  unsigned long loopEndTime = millis() - loopStartTime;
   Serial.print(F("readImu() executed in: ")); Serial.print(loopEndTime); Serial.println(F(" ms"));
 }
 
@@ -423,10 +424,10 @@ void readImu() {
 void readGps() {
 
   // Start loop timer
-  uint32_t loopStartTime = millis();
+  unsigned long loopStartTime = millis();
 
   bool fixFound = false;
-  uint8_t fixCounter = 0;
+  byte fixCounter = 0;
 
   // Wake up the receiver
   digitalWrite(GPS_INT_PIN, HIGH);
@@ -438,11 +439,11 @@ void readGps() {
   while (!fixFound && millis() - loopStartTime < 1UL * 60UL * 1000UL) {
 
 #ifdef DEBUGGING
-    int32_t latitude = gps.getLatitude();
-    int32_t longitude = gps.getLongitude();
-    uint16_t pdop = gps.getPDOP();
-    uint8_t fix = gps.getFixType();
-    uint8_t satellites = gps.getSIV();
+    long latitude = gps.getLatitude();
+    long longitude = gps.getLongitude();
+    unsigned int pdop = gps.getPDOP();
+    byte fix = gps.getFixType();
+    byte satellites = gps.getSIV();
 
     char datetime[20]; // GNSS date time buffer
     snprintf(datetime, sizeof(datetime), "%04u-%02d-%02d %02d:%02d:%02d",
@@ -494,7 +495,7 @@ void readGps() {
   }
 
   // Stop loop timer
-  uint32_t loopEndTime = millis() - loopStartTime;
+  unsigned long loopEndTime = millis() - loopStartTime;
   Serial.print(F("readGps() function execution: ")); Serial.print(loopEndTime); Serial.println(F(" ms"));
 
   // Place receiver in sleep/backup mode
@@ -509,15 +510,15 @@ void calculateStatistics() {
   message.roll      = rollStats.average() * 100;      // Roll mean
   message.heading   = headingStats.average() * 100;   // Heading mean
   message.voltage   = batteryStats.average() * 1000;  // Battery voltage min
-  message.ax = axStats.average() * 100; //
-  message.ay = ayStats.average() * 100; //
-  message.az = azStats.average() * 100; //
-  message.mx = mxStats.average() * 100; //
-  message.my = myStats.average() * 100; //
-  message.mz = mzStats.average() * 100; //
-  message.gx = gxStats.average() * 100; //
-  message.gy = gyStats.average() * 100; //
-  message.gz = gzStats.average() * 100; //
+  message.ax        = axStats.average() * 100; //
+  message.ay        = ayStats.average() * 100; //
+  message.az        = azStats.average() * 100; //
+  message.mx        = mxStats.average() * 100; //
+  message.my        = myStats.average() * 100; //
+  message.mz        = mzStats.average() * 100; //
+  message.gx        = gxStats.average() * 100; //
+  message.gy        = gyStats.average() * 100; //
+  message.gz        = gzStats.average() * 100; //
 
   // Clear statistics objects
   batteryStats.clear();
@@ -556,8 +557,8 @@ void writeBuffer() {
 void transmitData() {
 
   // Start loop timer
-  uint32_t loopStartTime = millis();
-  int16_t err;
+  unsigned long loopStartTime = millis();
+  int err;
 
   // Enable the supercapacitor charger
   Serial.println(F("Enabling the supercapacitor charger..."));
@@ -579,7 +580,7 @@ void transmitData() {
   Serial.println(F("Starting modem..."));
   err = modem.begin();
   if (err == ISBD_SUCCESS) {
-    uint8_t inBuffer[240];  // Buffer to store incoming transmission (240 byte limit)
+    byte inBuffer[240];  // Buffer to store incoming transmission (240 byte limit)
     size_t inBufferSize = sizeof(inBuffer);
     memset(inBuffer, 0x00, sizeof(inBuffer)); // Clear inBuffer array
 
@@ -610,7 +611,7 @@ void transmitData() {
 
         // Print inBuffer size and values of each incoming byte of data
         Serial.print(F("Inbound buffer size is: ")); Serial.println(inBufferSize);
-        for (uint8_t i = 0; i < inBufferSize; i++) {
+        for (byte i = 0; i < inBufferSize; i++) {
           Serial.print(F("Address: "));
           Serial.print(i);
           Serial.print(F("\tValue: "));
@@ -618,15 +619,14 @@ void transmitData() {
         }
 
         // Recompose bits using bitshift
-        uint8_t  resetFlagBuffer             = (((uint8_t)inBuffer[8] << 0) & 0xFF);
-        uint16_t maxRetransmitCounterBuffer = (((uint16_t)inBuffer[7] << 0) & 0xFF) +
-                                              (((uint16_t)inBuffer[6] << 8) & 0xFFFF);
-        uint16_t transmitIntervalBuffer     = (((uint16_t)inBuffer[5] << 0) & 0xFF) +
-                                              (((uint16_t)inBuffer[4] << 8) & 0xFFFF);
-        uint32_t alarmIntervalBuffer        = (((uint32_t)inBuffer[3] << 0) & 0xFF) +
-                                              (((uint32_t)inBuffer[2] << 8) & 0xFFFF) +
-                                              (((uint32_t)inBuffer[1] << 16) & 0xFFFFFF) +
-                                              (((uint32_t)inBuffer[0] << 24) & 0xFFFFFFFF);
+        byte resetFlagBuffer = (((byte)inBuffer[8] << 0) & 0xFF);
+        unsigned int  maxRetransmitCounterBuffer = (((unsigned int)inBuffer[7] << 0) & 0xFF) + (((unsigned int)inBuffer[6] << 8) & 0xFFFF);
+        unsigned int  transmitIntervalBuffer = (((unsigned int)inBuffer[5] << 0) & 0xFF) + (((unsigned int)inBuffer[4] << 8) & 0xFFFF);
+        unsigned long alarmIntervalBuffer = (((unsigned long)inBuffer[3] << 0) & 0xFF) +
+                                            (((unsigned long)inBuffer[2] << 8) & 0xFFFF) +
+                                            (((unsigned long)inBuffer[1] << 16) & 0xFFFFFF) +
+                                            (((unsigned long)inBuffer[0] << 24) & 0xFFFFFFFF);
+
         // Check if incoming data is valid
         if ((alarmIntervalBuffer >= 300 && alarmIntervalBuffer <= 1209600) &&
             (transmitIntervalBuffer >= 1 && transmitIntervalBuffer <= 24) &&
@@ -692,12 +692,12 @@ void transmitData() {
   digitalWrite(LED_BUILTIN, LOW);
 
   // Stop loop timer
-  uint32_t loopEndTime = millis() - loopStartTime;
+  unsigned long loopEndTime = millis() - loopStartTime;
   Serial.print(F("transmitData() function execution: ")); Serial.print(loopEndTime); Serial.println(F(" ms"));
 
   // Write data to union
   message.transmitDuration = loopEndTime / 1000;
-  
+
   Serial.print(F("retransmitCounter: ")); Serial.println(retransmitCounter);
 
   // Check if reset flag was transmitted
@@ -709,10 +709,10 @@ void transmitData() {
 }
 
 // Blink LED (non-blocking)
-void blinkLed(uint8_t flashes, uint32_t interval) {
-  uint8_t i = 0;
+void blinkLed(byte flashes, unsigned long interval) {
+  byte i = 0;
   while (i <= flashes) {
-    uint32_t currentMillis = millis();
+    unsigned long currentMillis = millis();
     if (currentMillis - previousMillis >= interval) {
       previousMillis = currentMillis;
       if (ledState == LOW) {
@@ -809,7 +809,7 @@ void printUnionBinary() {
   Serial.println(F("Union/structure "));
   Serial.println(F("-----------------------------------"));
   Serial.println(F("Byte\tHex\tBinary"));
-  for (uint16_t i = 0; i < sizeof(message); ++i) {
+  for (unsigned int i = 0; i < sizeof(message); ++i) {
     Serial.print(i);
     Serial.print("\t");
     Serial.print(message.bytes[i], HEX);
@@ -824,7 +824,7 @@ void printTransmitBuffer() {
   Serial.println(F("Transmit buffer"));
   Serial.println(F("-----------------------------------"));
   Serial.println(F("Byte\tHex\tBinary"));
-  for (uint16_t i = 0; i < sizeof(transmitBuffer); i++) {
+  for (unsigned int i = 0; i < sizeof(transmitBuffer); i++) {
     Serial.print(i);
     Serial.print(F("\t"));
     Serial.print(transmitBuffer[i], HEX);
@@ -882,8 +882,6 @@ void WDT_Handler() {
     while (WDT->STATUS.bit.SYNCBUSY); // Await synchronization of registers between clock domains
   }
   else {
-    //WDT->CTRL.bit.ENABLE = 0;         // For debugging only: Disable Watchdog
-    //digitalWrite(LED_BUILTIN, HIGH);  // For debugging only: Turn on LED to indicate Watchdog trigger
     while (true);                     // Force Watchdog Timer to reset the system
   }
 }
